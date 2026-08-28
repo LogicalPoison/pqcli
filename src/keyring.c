@@ -13,6 +13,7 @@
 #else
 #  include <unistd.h>
 #endif
+#include <dirent.h>
 
 /* Keyring is stored as one .pqpub-style text file per contact under
  * ~/.pqcli/keyring/<name>.pqpub
@@ -627,63 +628,144 @@ int pq_identity_is_protected(const char *name) {
 
 int pq_identity_list(void) {
     char *kd = keys_dir();
-    if (!kd) return -1;
-    /* Index of identities: we store a simple list file */
-    char *list_path = pq_path_join(kd, "identities");
-    free(kd);
-    if (!list_path) return -1;
-    if (!pq_file_exists(list_path)) {
-        printf("No identities found.\n");
-        free(list_path);
-        return 0;
+    if (!kd) {
+        printf("No identities found (cannot resolve keys dir).\n");
+        return -1;
     }
-    uint8_t *raw = NULL; size_t len = 0;
-    if (pq_read_file(list_path, &raw, &len) != 0) { free(list_path); return -1; }
-    free(list_path);
-    printf("%-16s  %-20s  %-20s  %s\n", "NAME", "KEM", "SIG", "FINGERPRINT");
-    char *line = (char *)raw;
-    while (line && *line) {
-        char *nl = strchr(line, '\n');
-        if (nl) *nl = 0;
-        if (line[0] && line[0] != '#') {
-            {
-                char tmp[512];
-#ifdef _WIN32
-                {
-                    char *td = getenv("TEMP");
-                    if (!td) td = getenv("TMP");
-                    if (!td) td = ".";
-                    snprintf(tmp, sizeof(tmp), "%s\\pqcli_list_%s.pqpub", td, line);
-                }
-#else
-                snprintf(tmp, sizeof(tmp), "/tmp/pqcli_list_%s.pqpub", line);
-#endif
-                if (pq_identity_export_public(line, tmp) == 0) {
-                    char *nm=NULL,*cm=NULL,*ka=NULL,*sa=NULL;
-                    uint8_t *kpk=NULL,*spk=NULL; size_t klen=0,slen=0;
-                    if (pq_read_public_key_file(tmp, &nm, &cm, &ka, &kpk, &klen, &sa, &spk, &slen) == 0) {
-                        size_t cl = klen + slen;
-                        uint8_t *c = malloc(cl);
-                        memcpy(c, kpk, klen); memcpy(c+klen, spk, slen);
-                        char *fp = pq_fingerprint(c, cl);
-                        free(c);
-                        int prot = pq_identity_is_protected(line);
-                        printf("%-16s  %-20s  %-20s  %s%s\n", line, ka, sa, fp ? fp : "-",
-                               prot == 1 ? "  [protected]" : "");
-                        free(fp); free(nm); free(cm); free(ka); free(sa); free(kpk); free(spk);
+
+    char **names = NULL;
+    size_t ncount = 0, ncap = 0;
+
+    DIR *dir = opendir(kd);
+    if (dir) {
+        struct dirent *ent;
+        while ((ent = readdir(dir)) != NULL) {
+            if (ent->d_name[0] == '.') continue;
+            /* skip the identities index file */
+            if (strcmp(ent->d_name, "identities") == 0) continue;
+            char *subdir = pq_path_join(kd, ent->d_name);
+            if (!subdir) continue;
+            char *meta = pq_path_join(subdir, "meta");
+            free(subdir);
+            if (!meta) continue;
+            int is_id = pq_file_exists(meta);
+            free(meta);
+            if (!is_id) continue;
+            if (ncount >= ncap) {
+                ncap = ncap ? ncap * 2 : 8;
+                char **nn = realloc(names, ncap * sizeof(char *));
+                if (!nn) break;
+                names = nn;
+            }
+            names[ncount++] = strdup(ent->d_name);
+        }
+        closedir(dir);
+    }
+
+    if (ncount == 0) {
+        char *list_path = pq_path_join(kd, "identities");
+        if (list_path && pq_file_exists(list_path)) {
+            uint8_t *raw = NULL; size_t len = 0;
+            if (pq_read_file(list_path, &raw, &len) == 0) {
+                char *line = (char *)raw;
+                while (line && *line) {
+                    char *nl = strchr(line, '\n');
+                    if (nl) *nl = 0;
+                    size_t L = strlen(line);
+                    while (L > 0 && (line[L-1] == '\r' || line[L-1] == ' ')) line[--L] = 0;
+                    if (line[0] && line[0] != '#') {
+                        if (ncount >= ncap) {
+                            ncap = ncap ? ncap * 2 : 8;
+                            names = realloc(names, ncap * sizeof(char *));
+                        }
+                        names[ncount++] = strdup(line);
                     }
-                    remove(tmp);
+                    if (!nl) break;
+                    line = nl + 1;
                 }
+                free(raw);
             }
         }
-        if (!nl) break;
-        line = nl + 1;
+        free(list_path);
     }
-    free(raw);
+
+    if (ncount == 0) {
+        printf("No identities found.\n");
+        printf("  Create one with: pqcli genkey <name>\n");
+        printf("  Expected dir: %s\n", kd);
+        free(kd);
+        free(names);
+        return 0;
+    }
+
+    printf("%-16s  %-18s  %-18s  %s\n", "NAME", "KEM", "SIG", "FINGERPRINT");
+    for (size_t i = 0; i < ncount; i++) {
+        char *name = names[i];
+        /* strip CR just in case */
+        size_t L = strlen(name);
+        while (L > 0 && (name[L-1] == '\r' || name[L-1] == ' ')) name[--L] = 0;
+
+        char *idir = pq_path_join(kd, name);
+        char *meta_path = idir ? pq_path_join(idir, "meta") : NULL;
+        char *kem_pk_path = idir ? pq_path_join(idir, "kem.pk") : NULL;
+        char *sig_pk_path = idir ? pq_path_join(idir, "sig.pk") : NULL;
+
+        char *kem_alg = NULL, *sig_alg = NULL;
+        if (meta_path) {
+            uint8_t *mraw = NULL; size_t mlen = 0;
+            if (pq_read_file(meta_path, &mraw, &mlen) == 0) {
+                char *line = (char *)mraw;
+                while (line && *line) {
+                    char *nl = strchr(line, '\n');
+                    if (nl) *nl = 0;
+                    size_t ll = strlen(line);
+                    while (ll > 0 && line[ll-1] == '\r') line[--ll] = 0;
+                    if (strncmp(line, "kem_alg=", 8) == 0) kem_alg = strdup(line + 8);
+                    else if (strncmp(line, "sig_alg=", 8) == 0) sig_alg = strdup(line + 8);
+                    if (!nl) break;
+                    line = nl + 1;
+                }
+                free(mraw);
+            }
+        }
+
+        char *fp = NULL;
+        if (kem_pk_path && sig_pk_path) {
+            uint8_t *kpk = NULL, *spk = NULL;
+            size_t klen = 0, slen = 0;
+            if (pq_read_file(kem_pk_path, &kpk, &klen) == 0 &&
+                pq_read_file(sig_pk_path, &spk, &slen) == 0) {
+                size_t cl = klen + slen;
+                uint8_t *comb = malloc(cl);
+                if (comb) {
+                    memcpy(comb, kpk, klen);
+                    memcpy(comb + klen, spk, slen);
+                    fp = pq_fingerprint(comb, cl);
+                    free(comb);
+                }
+            }
+            free(kpk); free(spk);
+        }
+
+        int prot = pq_identity_is_protected(name);
+        printf("%-16s  %-18s  %-18s  %s%s\n",
+               name[0] ? name : "(unnamed)",
+               kem_alg ? kem_alg : "?",
+               sig_alg ? sig_alg : "?",
+               fp ? fp : "-",
+               prot == 1 ? "  [protected]" : "");
+
+        free(idir); free(meta_path); free(kem_pk_path); free(sig_pk_path);
+        free(kem_alg); free(sig_alg); free(fp);
+        free(names[i]);
+    }
+    free(names);
+    free(kd);
     return 0;
 }
 
 static int identity_register(const char *name) {
+    if (ensure_dirs() != 0) return -1;
     char *kd = keys_dir();
     if (!kd) return -1;
     char *list_path = pq_path_join(kd, "identities");

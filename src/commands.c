@@ -229,6 +229,13 @@ int cmd_genkey(int argc, char **argv) {
         pq_success("Identity '%s' created (WARNING: secret keys stored in plaintext)", name);
     printf("  Fingerprint: %s\n", fp ? fp : "-");
     printf("  KEM: %s  SIG: %s\n", kem_alg, sig_alg);
+    {
+        char *cfg = pq_get_config_dir();
+        if (cfg) {
+            printf("  Stored in: %s/keys/%s/\n", cfg, name);
+            free(cfg);
+        }
+    }
     free(fp);
     pq_identity_free(&id);
     return 0;
