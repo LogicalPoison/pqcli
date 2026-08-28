@@ -15,7 +15,8 @@ static int cmd_keyring_dispatch(int argc, char **argv) {
         return 1;
     }
     const char *sub = argv[1];
-    char **sa = argv + 1; int sc = argc - 1;
+    char **sa = argv + 1;
+    const int sc = argc - 1;
     if (strcmp(sub, "list") == 0) return cmd_keyring_list(sc, sa);
     if (strcmp(sub, "add") == 0) return cmd_keyring_add(sc, sa);
     if (strcmp(sub, "remove") == 0 || strcmp(sub, "rm") == 0) return cmd_keyring_remove(sc, sa);
