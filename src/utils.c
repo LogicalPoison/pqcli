@@ -325,44 +325,122 @@ int pq_random_bytes(uint8_t *buf, size_t len) {
 }
 
 /* ---- passphrase (no echo) ---- */
-char *pq_get_passphrase(const char *prompt) {
+char *pq_get_passphrase(const char *prompt)
+{
+    fprintf(stderr, "%s", prompt ? prompt : "Passphrase: ");
+    fflush(stderr);
+
 #ifdef _WIN32
-    fprintf(stderr, "%s", prompt ? prompt : "Passphrase: ");
-    fflush(stderr);
+
+    HANDLE hstdin = GetStdHandle(STD_INPUT_HANDLE);
+    if (hstdin == INVALID_HANDLE_VALUE || hstdin == NULL)
+        return NULL;
+
+    DWORD old_mode;
+    if (!GetConsoleMode(hstdin, &old_mode))
+        return NULL;
+
+    DWORD new_mode = old_mode;
+    new_mode &= ~ENABLE_ECHO_INPUT;
+    new_mode |= ENABLE_LINE_INPUT;
+
+    if (!SetConsoleMode(hstdin, new_mode))
+        return NULL;
+
     char buf[512];
-    if (!fgets(buf, sizeof(buf), stdin)) return NULL;
+    DWORD chars_read = 0;
+
+    BOOL ok = ReadConsoleA(
+        hstdin,
+        buf,
+        sizeof(buf) - 1,
+        &chars_read,
+        NULL
+    );
+
+    /* Always restore console state */
+    SetConsoleMode(hstdin, old_mode);
+
+    fprintf(stderr, "\n");
+
+    if (!ok)
+        return NULL;
+
+    buf[chars_read] = '\0';
+
+    /* Remove CR/LF */
     size_t n = strlen(buf);
-    while (n && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = 0;
+    while (n > 0 &&
+           (buf[n - 1] == '\n' || buf[n - 1] == '\r')) {
+        buf[--n] = '\0';
+    }
+
     char *out = pq_secure_malloc(n + 1);
-    if (!out) return NULL;
+    if (!out) {
+        pq_memzero(buf, sizeof(buf));
+        return NULL;
+    }
+
     memcpy(out, buf, n + 1);
+
     pq_memzero(buf, sizeof(buf));
+
     return out;
+
 #else
-    fprintf(stderr, "%s", prompt ? prompt : "Passphrase: ");
-    fflush(stderr);
-    char *line = NULL;
-    /* disable echo */
+
     struct termios oldt, newt;
     int fd = STDIN_FILENO;
+
     int have_tio = (tcgetattr(fd, &oldt) == 0);
+
     if (have_tio) {
         newt = oldt;
         newt.c_lflag &= ~(ECHO);
-        tcsetattr(fd, TCSAFLUSH, &newt);
+
+        if (tcsetattr(fd, TCSAFLUSH, &newt) != 0)
+            have_tio = 0;
     }
+
+    char *line = NULL;
     size_t cap = 0;
+
     ssize_t n = getline(&line, &cap, stdin);
-    if (have_tio) tcsetattr(fd, TCSAFLUSH, &oldt);
+
+    /* Restore terminal even if getline() failed */
+    if (have_tio)
+        tcsetattr(fd, TCSAFLUSH, &oldt);
+
     fprintf(stderr, "\n");
-    if (n < 0) { free(line); return NULL; }
-    while (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = 0;
+
+    if (n < 0) {
+        if (line) {
+            pq_memzero(line, cap);
+            free(line);
+        }
+        return NULL;
+    }
+
+    while (n > 0 &&
+           (line[n - 1] == '\n' || line[n - 1] == '\r')) {
+        line[--n] = '\0';
+    }
+
     char *out = pq_secure_malloc((size_t)n + 1);
-    if (!out) { free(line); return NULL; }
+
+    if (!out) {
+        pq_memzero(line, cap);
+        free(line);
+        return NULL;
+    }
+
     memcpy(out, line, (size_t)n + 1);
-    pq_memzero(line, (size_t)n);
+
+    pq_memzero(line, cap);
     free(line);
+
     return out;
+
 #endif
 }
 
